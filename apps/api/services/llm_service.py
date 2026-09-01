@@ -7,6 +7,10 @@ from google import genai
 from core.ai.errors import AIConfigurationError, AIProviderError
 from core.ai.models import LLMResponse, Message
 from core.ai.provider import AIProvider
+from core.memory.extraction.schemas import ExtractionResult
+from core.memory.extraction.prompts import (
+    MEMORY_EXTRACTION_SYSTEM_PROMPT,
+)
 
 
 load_dotenv()
@@ -39,6 +43,9 @@ class GeminiProvider(AIProvider):
         self,
         messages: list[Message],
     ) -> LLMResponse:
+        """
+        Generate a normal conversational response.
+        """
 
         system_instruction = None
         conversation_messages = []
@@ -91,15 +98,35 @@ class GeminiProvider(AIProvider):
 
             except Exception as exc:
                 last_exception = exc
-
                 error_text = str(exc).lower()
+
+                # --------------------------------------------------
+                # 429 = quota/rate limit
+                # --------------------------------------------------
+                #
+                # Do NOT retry blindly when the daily quota is
+                # exhausted. The API response itself tells us that
+                # the quota has been exceeded.
+                #
+                if (
+                    "429" in error_text
+                    or "resource_exhausted" in error_text
+                    or "quota exceeded" in error_text
+                ):
+                    raise AIProviderError(
+                        "Gemini API quota has been exhausted. "
+                        "Please wait for the quota to reset or "
+                        "use a different Gemini API project/model."
+                    ) from exc
+
+                # --------------------------------------------------
+                # Temporary server-side failures
+                # --------------------------------------------------
 
                 is_temporary_error = (
                     "503" in error_text
                     or "unavailable" in error_text
                     or "high demand" in error_text
-                    or "429" in error_text
-                    or "resource exhausted" in error_text
                 )
 
                 if not is_temporary_error:
@@ -113,7 +140,7 @@ class GeminiProvider(AIProvider):
                 delay = self.INITIAL_RETRY_DELAY * (2 ** attempt)
 
                 print(
-                    f"Gemini temporarily unavailable. "
+                    "Gemini temporarily unavailable. "
                     f"Retrying in {delay} seconds "
                     f"(attempt {attempt + 1}/{self.MAX_RETRIES})..."
                 )
@@ -124,6 +151,65 @@ class GeminiProvider(AIProvider):
             "Gemini is temporarily unavailable after "
             f"{self.MAX_RETRIES} retries. Please try again."
         ) from last_exception
+
+    def generate_structured(
+        self,
+        system_prompt: str,
+        user_message: str,
+    ) -> ExtractionResult:
+        """
+        Generate structured memory candidates from a user message.
+
+        Gemini returns JSON matching ExtractionResult.
+        Pydantic validates the returned structure.
+        """
+
+        prompt = (
+            f"{system_prompt}\n\n"
+            "USER MESSAGE:\n"
+            f"{user_message}"
+        )
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_schema": ExtractionResult,
+                },
+            )
+
+            if not response.text:
+                raise AIProviderError(
+                    "Gemini returned an empty structured response."
+                )
+
+            return ExtractionResult.model_validate_json(
+                response.text
+            )
+
+        except AIProviderError:
+            raise
+
+        except Exception as exc:
+            error_text = str(exc).lower()
+
+            if (
+                "429" in error_text
+                or "resource_exhausted" in error_text
+                or "quota exceeded" in error_text
+            ):
+                raise AIProviderError(
+                    "Gemini API quota has been exhausted. "
+                    "Memory extraction cannot run until the "
+                    "quota resets or a different API project/model "
+                    "is configured."
+                ) from exc
+
+            raise AIProviderError(
+                f"Gemini structured extraction failed: {exc}"
+            ) from exc
 
 
 class LLMService:

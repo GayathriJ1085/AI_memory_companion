@@ -1,13 +1,19 @@
 from core.ai.models import LLMResponse
 from core.conversation.orchestrator import ConversationOrchestrator
 from core.conversation.session import ConversationSession
+from core.memory.manager.manager import MemoryManager
 
 
 class ConversationService:
-    """Application service for managing Phase 1 conversations."""
+    """Application service for managing conversations and memories."""
 
-    def __init__(self, orchestrator: ConversationOrchestrator):
+    def __init__(
+        self,
+        orchestrator: ConversationOrchestrator,
+        memory_manager: MemoryManager,
+    ):
         self.orchestrator = orchestrator
+        self.memory_manager = memory_manager
         self.sessions: dict[str, ConversationSession] = {}
 
     def get_or_create_session(
@@ -26,7 +32,13 @@ class ConversationService:
         session_id: str,
         message: str,
     ) -> LLMResponse:
-        """Process a message inside the requested session."""
+        """
+        Process a user message.
+
+        The message is:
+        1. Sent through the normal conversation pipeline.
+        2. Passed through the memory pipeline.
+        """
 
         session = self.get_or_create_session(session_id)
 
@@ -34,6 +46,10 @@ class ConversationService:
             session=session,
             user_message=message,
         )
+
+        # Process possible long-term memories from the
+        # user's original message.
+        self.memory_manager.process_message(message)
 
         return LLMResponse(
             content=response_content,
